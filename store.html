@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>متجر المطعم — اطلب أونلاين</title>
+<style>
+:root{
+  --bg:#faf7f2; --card:#ffffff; --ink:#1c1917; --muted:#78716c;
+  --brand:#ea580c; --brand2:#f97316; --green:#16a34a; --line:#e7e5e4;
+  --shadow:0 10px 30px rgba(28,25,23,.08);
+}
+*{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',Tahoma,sans-serif}
+body{background:var(--bg);color:var(--ink);line-height:1.7}
+.container{width:min(1100px,92%);margin:0 auto}
+.hidden{display:none!important}
+
+/* ===== Header ===== */
+header{position:sticky;top:0;z-index:50;background:rgba(250,247,242,.9);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.hbar{display:flex;align-items:center;justify-content:space-between;padding:14px 0;gap:12px}
+.logo{font-size:24px;font-weight:800}
+.logo span{color:var(--brand)}
+.cartbtn{position:relative;background:var(--ink);color:#fff;border:none;border-radius:999px;padding:10px 20px;font-weight:700;cursor:pointer;display:flex;gap:8px;align-items:center;transition:.2s}
+.cartbtn:hover{background:var(--brand)}
+.cartbtn .cnt{background:var(--brand);border-radius:999px;min-width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:13px}
+.cartbtn:hover .cnt{background:#fff;color:var(--brand)}
+
+/* ===== Hero ===== */
+.hero{padding:56px 0 32px;text-align:center}
+.hero .tag{display:inline-block;background:#ffedd5;color:var(--brand);font-weight:700;font-size:13px;padding:6px 16px;border-radius:999px;margin-bottom:14px}
+.hero h1{font-size:clamp(30px,5vw,46px);font-weight:900;line-height:1.3}
+.hero h1 em{color:var(--brand);font-style:normal}
+.hero p{color:var(--muted);max-width:520px;margin:12px auto 0}
+
+/* ===== Categories ===== */
+.cats{position:sticky;top:69px;z-index:40;background:var(--bg);padding:14px 0;display:flex;gap:10px;overflow-x:auto;scrollbar-width:none}
+.cats::-webkit-scrollbar{display:none}
+.chip{white-space:nowrap;border:1px solid var(--line);background:#fff;border-radius:999px;padding:9px 20px;font-weight:700;font-size:14px;cursor:pointer;color:var(--muted);transition:.2s}
+.chip.active,.chip:hover{background:var(--ink);color:#fff;border-color:var(--ink)}
+
+/* ===== Menu grid ===== */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:20px;padding:10px 0 80px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:var(--shadow);transition:.25s;display:flex;flex-direction:column}
+.card:hover{transform:translateY(-4px)}
+.thumb{height:140px;display:flex;align-items:center;justify-content:center;font-size:56px;background:linear-gradient(135deg,#ffedd5,#fee2e2)}
+.card .body{padding:16px;display:flex;flex-direction:column;gap:6px;flex:1}
+.card h3{font-size:17px}
+.card .cat{color:var(--muted);font-size:12px}
+.card .row{display:flex;align-items:center;justify-content:space-between;margin-top:auto;padding-top:10px}
+.price{font-weight:900;font-size:18px;color:var(--brand)}
+.price small{font-weight:400;color:var(--muted);font-size:12px}
+.add{background:var(--ink);color:#fff;border:none;border-radius:12px;padding:9px 16px;font-weight:700;cursor:pointer;transition:.2s}
+.add:hover{background:var(--brand)}
+.added{background:var(--green)!important}
+
+/* ===== Cart drawer ===== */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:90;opacity:0;pointer-events:none;transition:.25s}
+.overlay.open{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;left:0;height:100%;width:min(420px,92%);background:#fff;z-index:100;transform:translateX(-105%);transition:.3s;display:flex;flex-direction:column;box-shadow:0 0 40px rgba(0,0,0,.15)}
+.drawer.open{transform:none}
+.dhead{display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid var(--line)}
+.dhead h2{font-size:19px}
+.close{background:none;border:none;font-size:22px;cursor:pointer;color:var(--muted)}
+.items{flex:1;overflow-y:auto;padding:14px 20px;display:flex;flex-direction:column;gap:12px}
+.ci{display:flex;align-items:center;gap:12px;border:1px solid var(--line);border-radius:14px;padding:10px 12px}
+.ci .ic{font-size:28px}
+.ci .info{flex:1}
+.ci .info b{font-size:14px}
+.ci .info small{display:block;color:var(--muted)}
+.qty{display:flex;align-items:center;gap:8px}
+.qty button{width:26px;height:26px;border-radius:8px;border:1px solid var(--line);background:#fff;cursor:pointer;font-weight:800}
+.qty button:hover{background:var(--ink);color:#fff}
+.dfoot{border-top:1px solid var(--line);padding:16px 20px;display:flex;flex-direction:column;gap:10px}
+.total{display:flex;justify-content:space-between;font-weight:900;font-size:17px}
+input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--bg);outline:none;font-size:14px}
+input:focus{border-color:var(--brand)}
+.orderbtn{background:linear-gradient(135deg,var(--brand),var(--brand2));color:#fff;border:none;border-radius:14px;padding:14px;font-weight:800;font-size:16px;cursor:pointer;transition:.2s}
+.orderbtn:hover{transform:translateY(-2px)}
+.empty{text-align:center;color:var(--muted);padding:40px 0}
+
+/* ===== Success toast ===== */
+.toast{position:fixed;bottom:24px;right:50%;transform:translate(50%,120%);background:var(--ink);color:#fff;padding:14px 26px;border-radius:999px;z-index:200;transition:.35s;font-weight:700;box-shadow:0 10px 30px rgba(0,0,0,.3)}
+.toast.show{transform:translate(50%,0)}
+.offline{background:#fee2e2;color:#b91c1c;text-align:center;padding:40px 0;border-radius:20px;font-weight:700}
+footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 0;border-top:1px solid var(--line)}
+@media(max-width:600px){.grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px}.thumb{height:100px;font-size:42px}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="container hbar">
+    <div class="logo">Dine<span>OS</span> <small style="color:var(--muted);font-size:12px" id="rname"></small></div>
+    <button class="cartbtn" onclick="toggleCart(true)">🛒 السلة <span class="cnt" id="cartCount">0</span></button>
+  </div>
+</header>
+
+<section class="hero container">
+  <span class="tag">🍽️ اطلب أونلاين واستلم طلبك</span>
+  <h1>أهلاً بيك في <em id="rname2">مطعمنا</em></h1>
+  <p>اختار من المنيو وأضف للسلة — طلبك بيوصل للمطبخ فوراً.</p>
+</section>
+
+<div class="container cats" id="cats"></div>
+<div class="container grid" id="grid"></div>
+<footer>مدعوم بواسطة DineOS — نظام إدارة المطاعم</footer>
+
+<div class="overlay" id="overlay" onclick="toggleCart(false)"></div>
+<aside class="drawer" id="drawer">
+  <div class="dhead"><h2>🛒 سلتك</h2><button class="close" onclick="toggleCart(false)">✕</button></div>
+  <div class="items" id="items"></div>
+  <div class="dfoot">
+    <div class="total"><span>الإجمالي</span><span id="cartTotal">0 ج.م</span></div>
+    <input id="custName" placeholder="اسمك (اختياري) — عشان ننده عليك">
+    <button class="orderbtn" onclick="checkout()">تأكيد الطلب ✓</button>
+  </div>
+</aside>
+
+<div class="toast" id="toast">✅ تم استلام طلبك!</div>
+
+<script>
+// رقم المطعم بييجي من اللينك: store.html?u=1
+const UID = new URLSearchParams(location.search).get('u') || 1;
+let MENU = [], cart = [];
+
+async function load() {
+  const r = await fetch('/api/public/store/' + UID);
+  const d = await r.json();
+  if (d.error) { document.getElementById('grid').innerHTML = '<div class="offline">المتجر غير متاح حالياً 🙏</div>'; return; }
+  MENU = d.menu;
+  document.getElementById('rname').textContent = d.restaurant;
+  document.getElementById('rname2').textContent = d.restaurant;
+  if (!d.online) { document.getElementById('grid').innerHTML = '<div class="offline">الطلب أونلاين متوقف حالياً — تفضل بمكاننا 🙏</div>'; return; }
+  renderCats('الكل'); renderGrid('الكل');
+}
+
+function renderCats(active) {
+  const cats = ['الكل', ...new Set(MENU.map(m => m.cat))];
+  document.getElementById('cats').innerHTML = cats.map(c =>
+    `<button class="chip ${c === active ? 'active' : ''}" onclick="filter('${c}',this)">${c}</button>`).join('');
+}
+function filter(c, btn) {
+  document.querySelectorAll('.chip').forEach(x => x.classList.remove('active'));
+  btn.classList.add('active'); renderGrid(c);
+}
+function renderGrid(cat) {
+  const list = cat === 'الكل' ? MENU : MENU.filter(m => m.cat === cat);
+  document.getElementById('grid').innerHTML = list.map(m => `
+    <div class="card">
+      <div class="thumb">${m.img || '🍽️'}</div>
+      <div class="body">
+        <h3>${m.name}</h3>
+        <span class="cat">${m.cat}</span>
+        <div class="row">
+          <span class="price">${m.price} <small>ج.م</small></span>
+          <button class="add" id="add${m.id}" onclick="addToCart(${m.id},this)">+ أضف</button>
+        </div>
+      </div>
+    </div>`).join('') || '<div class="empty">لا توجد أصناف هنا</div>';
+}
+
+function addToCart(id, btn) {
+  const it = cart.find(x => x.id === id);
+  if (it) it.qty++; else cart.push({ id, qty: 1 });
+  btn.classList.add('added'); btn.textContent = '✓ اتضاف';
+  setTimeout(() => { btn.classList.remove('added'); btn.textContent = '+ أضف'; }, 900);
+  renderCart();
+}
+
+function renderCart() {
+  const count = cart.reduce((s, x) => s + x.qty, 0);
+  document.getElementById('cartCount').textContent = count;
+  const box = document.getElementById('items');
+  if (!cart.length) { box.innerHTML = '<div class="empty">سلتك فاضية — اختار من المنيو 🍔</div>'; document.getElementById('cartTotal').textContent = '0 ج.م'; return; }
+  box.innerHTML = cart.map(x => {
+    const m = MENU.find(y => y.id === x.id);
+    return `<div class="ci">
+      <span class="ic">${m.img || '🍽️'}</span>
+      <div class="info"><b>${m.name}</b><small>${m.price} ج.م</small></div>
+      <div class="qty">
+        <button onclick="chg(${x.id},1)">+</button><b>${x.qty}</b><button onclick="chg(${x.id},-1)">−</button>
+      </div>
+    </div>`;
+  }).join('');
+  document.getElementById('cartTotal').textContent = cart.reduce((s, x) => s + MENU.find(y => y.id === x.id).price * x.qty, 0) + ' ج.م';
+}
+
+function chg(id, d) {
+  const it = cart.find(x => x.id === id);
+  it.qty += d; if (it.qty <= 0) cart = cart.filter(x => x.id !== id);
+  renderCart();
+}
+
+function toggleCart(open) {
+  document.getElementById('drawer').classList.toggle('open', open);
+  document.getElementById('overlay').classList.toggle('open', open);
+}
+
+async function checkout() {
+  if (!cart.length) return;
+  const name = document.getElementById('custName').value.trim();
+  for (const x of cart) {
+    await fetch('/api/public/order/' + UID, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ menu_id: x.id, qty: x.qty, customer: name })
+    });
+  }
+  cart = []; renderCart(); toggleCart(false);
+  const t = document.getElementById('toast');
+  t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+load();
+</script>
+</body>
+</html>

@@ -3,17 +3,35 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Database = require('better-sqlite3');
+const { OAuth2Client } = require('google-auth-library');
 
 const PORT = process.env.PORT || 3000;
 // CHANGE THIS in production: set JWT_SECRET env variable
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+
+// ---------- Google Sign-In config ----------
+// Get a Client ID from https://console.cloud.google.com/apis/credentials
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
+
+// ---------- Twilio (SMS / WhatsApp OTP) config ----------
+// Get these from https://console.twilio.com
+const TWILIO_SID = process.env.TWILIO_SID || '';
+const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
+const TWILIO_SMS_FROM = process.env.TWILIO_SMS_FROM || '';       // e.g. +14155238886
+const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || ''; // e.g. whatsapp:+14155238886
+let twilioClient = null;
+if (TWILIO_SID && TWILIO_TOKEN) {
+  twilioClient = require('twilio')(TWILIO_SID, TWILIO_TOKEN);
+}
 
 const db = new Database(path.join(__dirname, 'data.sqlite'));
 db.pragma('journal_mode = WAL');
 
 // ---------- Schema (multi-tenant: every table belongs to a user) ----------
 db.exec(`
-CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL, pass TEXT NOT NULL, name TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, username TEXT UNIQUE, phone TEXT UNIQUE, google_id TEXT UNIQUE, pass TEXT, name TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS otp_codes(id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, code TEXT NOT NULL, expires_at DATETIME NOT NULL, used INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS menu(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL, price REAL NOT NULL, cat TEXT DEFAULT 'General', img TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, item TEXT NOT NULL, qty INTEGER NOT NULL, total REAL NOT NULL, type TEXT DEFAULT 'Dine-in', status TEXT DEFAULT 'New', customer TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS inventory(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL, qty REAL NOT NULL DEFAULT 0, min REAL NOT NULL DEFAULT 0, unit TEXT DEFAULT 'pcs');
@@ -27,6 +45,13 @@ function ensureCol(table) {
   if (!cols.includes('user_id')) db.exec(`ALTER TABLE ${table} ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`);
 }
 ['menu', 'orders', 'inventory', 'staff'].forEach(ensureCol);
+function ensureUserCol(name, def) {
+  const cols = db.prepare(`PRAGMA table_info(users)`).all().map(c => c.name);
+  if (!cols.includes(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${def}`);
+}
+ensureUserCol('username', 'TEXT');
+ensureUserCol('phone', 'TEXT');
+ensureUserCol('google_id', 'TEXT');
 if (!db.prepare("PRAGMA table_info(settings)").all().map(c => c.name).includes('user_id')) {
   db.exec('ALTER TABLE settings ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_user ON settings(key, user_id)');
@@ -51,10 +76,10 @@ function seedForUser(uid) {
 }
 
 // ---------- Seed default admin ----------
-if (!db.prepare('SELECT id FROM users WHERE email=?').get('admin@dineos.app')) {
-  db.prepare('INSERT INTO users(email,pass,name) VALUES (?,?,?)')
-    .run('admin@dineos.app', bcrypt.hashSync('admin123', 10), 'Admin');
-  console.log('Seeded demo data. Login: admin@dineos.app / admin123');
+if (!db.prepare('SELECT id FROM users WHERE username=?').get('admin')) {
+  db.prepare('INSERT INTO users(username,email,pass,name) VALUES (?,?,?,?)')
+    .run('admin', 'admin@dineos.app', bcrypt.hashSync('admin123', 10), 'Admin');
+  console.log('Seeded demo data. Login: admin / admin123');
 }
 seedForUser(1);
 
@@ -71,26 +96,91 @@ function auth(req, res, next) {
   catch (e) { res.status(401).json({ error: 'invalid token' }); }
 }
 
+function signToken(u) {
+  return jwt.sign({ id: u.id }, JWT_SECRET, { expiresIn: '7d' });
+}
+
+// ---------- 1) Username + password ----------
 app.post('/api/register', (req, res) => {
-  const email = String(req.body?.email || '').toLowerCase().trim();
+  const username = String(req.body?.username || '').toLowerCase().trim();
   const pass = String(req.body?.pass || '');
-  const name = String(req.body?.name || '');
-  if (!email || pass.length < 6) return res.status(400).json({ error: 'email required & password min 6 chars' });
+  if (!/^[a-z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: 'username: 3-20 chars, letters/numbers/underscore only' });
+  if (pass.length < 6) return res.status(400).json({ error: 'password min 6 chars' });
   try {
-    const r = db.prepare('INSERT INTO users(email,pass,name) VALUES (?,?,?)').run(email, bcrypt.hashSync(pass, 10), name);
+    const r = db.prepare('INSERT INTO users(username,pass,name) VALUES (?,?,?)').run(username, bcrypt.hashSync(pass, 10), username);
     seedForUser(r.lastInsertRowid);
-    const token = jwt.sign({ id: r.lastInsertRowid, email }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, name });
-  } catch (e) { res.status(409).json({ error: 'email already exists' }); }
+    res.json({ token: signToken({ id: r.lastInsertRowid }), name: username });
+  } catch (e) { res.status(409).json({ error: 'username already taken' }); }
 });
 
 app.post('/api/login', (req, res) => {
-  const email = String(req.body?.email || '').toLowerCase().trim();
-  const u = db.prepare('SELECT * FROM users WHERE email=?').get(email);
-  if (!u || !bcrypt.compareSync(String(req.body?.pass || ''), u.pass))
-    return res.status(401).json({ error: 'wrong email or password' });
-  const token = jwt.sign({ id: u.id, email: u.email }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ token, name: u.name });
+  const username = String(req.body?.username || '').toLowerCase().trim();
+  const u = db.prepare('SELECT * FROM users WHERE username=?').get(username);
+  if (!u || !u.pass || !bcrypt.compareSync(String(req.body?.pass || ''), u.pass))
+    return res.status(401).json({ error: 'wrong username or password' });
+  res.json({ token: signToken(u), name: u.name });
+});
+
+// ---------- 2) Google Sign-In ----------
+// Frontend gets a Google ID token via Google Identity Services, sends it here.
+app.post('/api/auth/google', async (req, res) => {
+  if (!googleClient) return res.status(501).json({ error: 'Google sign-in not configured on server (set GOOGLE_CLIENT_ID)' });
+  try {
+    const ticket = await googleClient.verifyIdToken({ idToken: req.body?.credential, audience: GOOGLE_CLIENT_ID });
+    const payload = ticket.getPayload();
+    let u = db.prepare('SELECT * FROM users WHERE google_id=?').get(payload.sub);
+    if (!u) {
+      const r = db.prepare('INSERT INTO users(google_id,email,name) VALUES (?,?,?)').run(payload.sub, payload.email || null, payload.name || '');
+      seedForUser(r.lastInsertRowid);
+      u = db.prepare('SELECT * FROM users WHERE id=?').get(r.lastInsertRowid);
+    }
+    res.json({ token: signToken(u), name: u.name });
+  } catch (e) { res.status(401).json({ error: 'invalid Google token' }); }
+});
+
+// ---------- 3) Phone number + OTP (WhatsApp or SMS) ----------
+function genCode() { return String(Math.floor(100000 + Math.random() * 900000)); }
+
+app.post('/api/auth/otp/send', async (req, res) => {
+  const phone = String(req.body?.phone || '').trim(); // E.164 format e.g. +9665xxxxxxx
+  const channel = req.body?.channel === 'whatsapp' ? 'whatsapp' : 'sms';
+  if (!/^\+[1-9]\d{7,14}$/.test(phone)) return res.status(400).json({ error: 'phone must be in international format, e.g. +9665xxxxxxxx' });
+
+  const code = genCode();
+  const expires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  db.prepare('INSERT INTO otp_codes(phone,code,expires_at) VALUES (?,?,?)').run(phone, code, expires);
+
+  if (twilioClient) {
+    try {
+      if (channel === 'whatsapp') {
+        if (!TWILIO_WHATSAPP_FROM) return res.status(501).json({ error: 'WhatsApp sending not configured (set TWILIO_WHATSAPP_FROM)' });
+        await twilioClient.messages.create({ from: TWILIO_WHATSAPP_FROM, to: 'whatsapp:' + phone, body: `DineOS code: ${code}` });
+      } else {
+        if (!TWILIO_SMS_FROM) return res.status(501).json({ error: 'SMS sending not configured (set TWILIO_SMS_FROM)' });
+        await twilioClient.messages.create({ from: TWILIO_SMS_FROM, to: phone, body: `DineOS code: ${code}` });
+      }
+    } catch (e) { return res.status(502).json({ error: 'failed to send code: ' + e.message }); }
+  } else {
+    // No Twilio credentials set yet — log to server console so you can test locally.
+    console.log(`[DEV] OTP for ${phone} via ${channel}: ${code}`);
+  }
+  res.json({ ok: true, dev: !twilioClient }); // dev:true means "check server console, no real message sent"
+});
+
+app.post('/api/auth/otp/verify', (req, res) => {
+  const phone = String(req.body?.phone || '').trim();
+  const code = String(req.body?.code || '').trim();
+  const row = db.prepare('SELECT * FROM otp_codes WHERE phone=? AND code=? AND used=0 ORDER BY id DESC LIMIT 1').get(phone, code);
+  if (!row || new Date(row.expires_at) < new Date()) return res.status(401).json({ error: 'invalid or expired code' });
+  db.prepare('UPDATE otp_codes SET used=1 WHERE id=?').run(row.id);
+
+  let u = db.prepare('SELECT * FROM users WHERE phone=?').get(phone);
+  if (!u) {
+    const r = db.prepare('INSERT INTO users(phone,name) VALUES (?,?)').run(phone, phone);
+    seedForUser(r.lastInsertRowid);
+    u = db.prepare('SELECT * FROM users WHERE id=?').get(r.lastInsertRowid);
+  }
+  res.json({ token: signToken(u), name: u.name });
 });
 
 // ---------- Settings (scoped to logged-in user) ----------

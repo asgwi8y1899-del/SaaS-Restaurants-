@@ -15,14 +15,32 @@ npm start
 
 Open http://localhost:3000
 
-**Default login:** `admin@dineos.app` / `admin123`
+**Default login:** username `admin` / password `admin123`
+
+## Login methods
+
+DineOS supports 3 ways to sign in:
+
+1. **Username + password** — works everywhere, no setup needed.
+2. **Phone number + OTP (WhatsApp or SMS)** — needs a Twilio account.
+   Set env vars `TWILIO_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_SMS_FROM`,
+   `TWILIO_WHATSAPP_FROM`. Without them, OTP codes are printed to the
+   server console instead of sent (dev mode) — fine for testing.
+3. **Google Sign-In** — needs a Google OAuth Client ID from
+   [Google Cloud Console](https://console.cloud.google.com/apis/credentials).
+   Set env var `GOOGLE_CLIENT_ID` on the server, and paste the same
+   Client ID into `public/app.html` (`initGoogle()`, replace
+   `YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com`).
 
 ## API overview
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | /api/register | Create account (returns JWT) |
-| POST | /api/login | Login (returns JWT) |
+| POST | /api/register | Create account with username+password (returns JWT) |
+| POST | /api/login | Login with username+password (returns JWT) |
+| POST | /api/auth/google | Login/register with a Google ID token (returns JWT) |
+| POST | /api/auth/otp/send | Send a phone OTP via `whatsapp` or `sms` channel |
+| POST | /api/auth/otp/verify | Verify phone OTP, login/register (returns JWT) |
 | GET/PUT | /api/settings | Workspace settings |
 | GET/POST/DELETE | /api/menu | Menu items |
 | GET/POST/PATCH/DELETE | /api/orders | Orders (PATCH = change status) |

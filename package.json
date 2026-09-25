@@ -12,7 +12,9 @@
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.3.0",
     "express": "^4.19.2",
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.2",
+    "google-auth-library": "^9.14.1",
+    "twilio": "^5.3.0"
   },
   "license": "MIT"
 }
