@@ -3,7 +3,7 @@
 All-in-one restaurant management platform: POS, online orders, QR menus,
 inventory, staff management, smart reports & settings.
 
-**Stack:** Node.js + Express + SQLite (better-sqlite3) + Vanilla JS frontend.
+**Stack:** Node.js (v22.5+) + Express + SQLite (built-in `node:sqlite`, no native compilation needed) + Vanilla JS frontend.
 No build step. One command to run.
 
 ## Quick start

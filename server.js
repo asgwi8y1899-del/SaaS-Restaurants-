@@ -1,37 +1,54 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const { execFile } = require('child_process');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const Database = require('better-sqlite3');
+const { DatabaseSync } = require('node:sqlite');
 const { OAuth2Client } = require('google-auth-library');
+const { sendOTPByEmail } = require('./emailService'); // <--- سطر الإيميل
 
 const PORT = process.env.PORT || 3000;
-// CHANGE THIS in production: set JWT_SECRET env variable
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+
+// ---------- JWT secret ----------
+function loadJwtSecret() {
+  if (process.env.JWT_SECRET && process.env.JWT_SECRET.length >= 32) return process.env.JWT_SECRET;
+  const f = path.join(__dirname, '.jwt_secret');
+  try {
+    const v = fs.readFileSync(f, 'utf8').trim();
+    if (v.length >= 32) return v;
+  } catch (e) { }
+  const v = crypto.randomBytes(48).toString('hex');
+  fs.writeFileSync(f, v, { mode: 0o600 });
+  console.log('Generated a new random JWT secret (saved to .jwt_secret).');
+  return v;
+}
+const JWT_SECRET = loadJwtSecret();
 
 // ---------- Google Sign-In config ----------
-// Get a Client ID from https://console.cloud.google.com/apis/credentials
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 
-// ---------- Twilio (SMS / WhatsApp OTP) config ----------
-// Get these from https://console.twilio.com
+// ---------- Twilio config ----------
 const TWILIO_SID = process.env.TWILIO_SID || '';
 const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
-const TWILIO_SMS_FROM = process.env.TWILIO_SMS_FROM || '';       // e.g. +14155238886
-const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || ''; // e.g. whatsapp:+14155238886
+const TWILIO_SMS_FROM = process.env.TWILIO_SMS_FROM || '';
+const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || '';
 let twilioClient = null;
 if (TWILIO_SID && TWILIO_TOKEN) {
   twilioClient = require('twilio')(TWILIO_SID, TWILIO_TOKEN);
 }
 
-const db = new Database(path.join(__dirname, 'data.sqlite'));
-db.pragma('journal_mode = WAL');
+const db = new DatabaseSync(path.join(__dirname, 'data.sqlite'));
+db.exec('PRAGMA journal_mode = WAL');
 
-// ---------- Schema (multi-tenant: every table belongs to a user) ----------
+// ---------- Schema ----------
 db.exec(`
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, username TEXT UNIQUE, phone TEXT UNIQUE, google_id TEXT UNIQUE, pass TEXT, name TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS otp_codes(id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, code TEXT NOT NULL, expires_at DATETIME NOT NULL, used INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS otp_codes(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, code TEXT NOT NULL, expires_at DATETIME NOT NULL, used INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS menu(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL, price REAL NOT NULL, cat TEXT DEFAULT 'General', img TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, item TEXT NOT NULL, qty INTEGER NOT NULL, total REAL NOT NULL, type TEXT DEFAULT 'Dine-in', status TEXT DEFAULT 'New', customer TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS inventory(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL, qty REAL NOT NULL DEFAULT 0, min REAL NOT NULL DEFAULT 0, unit TEXT DEFAULT 'pcs');
@@ -39,7 +56,12 @@ CREATE TABLE IF NOT EXISTS staff(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id I
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 1, value TEXT, UNIQUE(key, user_id));
 `);
 
-// ---------- Migration: add user_id to old DBs ----------
+// ---------- Migration ----------
+// old otp_codes table used a phone column -> recreate it with email (codes are temporary)
+if (!db.prepare('PRAGMA table_info(otp_codes)').all().map(c => c.name).includes('email')) {
+  db.exec('DROP TABLE otp_codes');
+  db.exec('CREATE TABLE otp_codes(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, code TEXT NOT NULL, expires_at DATETIME NOT NULL, used INTEGER NOT NULL DEFAULT 0)');
+}
 function ensureCol(table) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
   if (!cols.includes('user_id')) db.exec(`ALTER TABLE ${table} ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`);
@@ -57,11 +79,11 @@ if (!db.prepare("PRAGMA table_info(settings)").all().map(c => c.name).includes('
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_user ON settings(key, user_id)');
 }
 
-// ---------- Seed starter data per user ----------
+// ---------- Seed data ----------
 function seedForUser(uid) {
   const has = db.prepare('SELECT id FROM menu WHERE user_id=?').get(uid);
   if (has) return;
-  const mi = db.prepare('INSERT INTO menu(user_id,name,price,cat) VALUES (?,?,?,?)');
+  const mi = db.prepare('INSERT INTO menu(user_id,name,price,cat,img) VALUES (?,?,?,?,?)');
   [['Classic Burger',45,'Mains','🍔'],['Margherita Pizza',60,'Mains','🍕'],['Caesar Salad',35,'Salads','🥗'],
    ['Fresh Orange Juice',18,'Drinks','🍊'],['Tiramisu',28,'Desserts','🍰']].forEach(m=>mi.run(uid,...m));
   const ii = db.prepare('INSERT INTO inventory(user_id,name,qty,min,unit) VALUES (?,?,?,?,?)');
@@ -75,16 +97,46 @@ function seedForUser(uid) {
    ['loyalty','1'],['kitchen','1'],['autoPrint','1']].forEach(s=>gi.run(s[0],uid,s[1]));
 }
 
-// ---------- Seed default admin ----------
-if (!db.prepare('SELECT id FROM users WHERE username=?').get('admin')) {
+// ---------- Default admin ----------
+function randomPassword() { return crypto.randomBytes(9).toString('base64url'); }
+const adminRow = db.prepare('SELECT id, pass FROM users WHERE username=?').get('admin');
+if (!adminRow) {
+  const pw = process.env.ADMIN_PASSWORD || randomPassword();
   db.prepare('INSERT INTO users(username,email,pass,name) VALUES (?,?,?,?)')
-    .run('admin', 'admin@dineos.app', bcrypt.hashSync('admin123', 10), 'Admin');
-  console.log('Seeded demo data. Login: admin / admin123');
+    .run('admin', 'admin@dineos.app', bcrypt.hashSync(pw, 10), 'Admin');
+  console.log('==================================================');
+  console.log(' Admin account created.  username: admin');
+  if (!process.env.ADMIN_PASSWORD) console.log(' password: ' + pw + '   <-- save it now, shown only once');
+  console.log('==================================================');
+} else if (adminRow.pass && bcrypt.compareSync('admin123', adminRow.pass)) {
+  const pw = process.env.ADMIN_PASSWORD || randomPassword();
+  db.prepare('UPDATE users SET pass=? WHERE id=?').run(bcrypt.hashSync(pw, 10), adminRow.id);
+  console.log('==================================================');
+  console.log(' The weak default admin password was replaced.');
+  if (!process.env.ADMIN_PASSWORD) console.log(' NEW admin password: ' + pw + '   <-- save it now, shown only once');
+  console.log('==================================================');
 }
 seedForUser(1);
 
 const app = express();
-app.use(express.json());
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(express.json({ limit: '100kb' }));
+
+// ---------- Rate limiting ----------
+function limiter(max, minutes, msg) {
+  return rateLimit({
+    windowMs: minutes * 60 * 1000, max, standardHeaders: true, legacyHeaders: false,
+    message: { error: msg || 'Too many attempts, try again later' },
+  });
+}
+const loginLimiter = limiter(10, 15, 'Too many login attempts, try again in 15 minutes');
+const registerLimiter = limiter(10, 60, 'Too many sign-ups from this network, try again later');
+const otpSendLimiter = limiter(5, 15, 'Too many code requests, try again in 15 minutes');
+const otpVerifyLimiter = limiter(10, 15, 'Too many attempts, try again in 15 minutes');
+const googleLimiter = limiter(30, 15);
+app.use('/api/', limiter(600, 15));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- Auth ----------
@@ -95,13 +147,12 @@ function auth(req, res, next) {
   try { req.user = jwt.verify(t, JWT_SECRET); next(); }
   catch (e) { res.status(401).json({ error: 'invalid token' }); }
 }
-
 function signToken(u) {
   return jwt.sign({ id: u.id }, JWT_SECRET, { expiresIn: '7d' });
 }
 
 // ---------- 1) Username + password ----------
-app.post('/api/register', (req, res) => {
+app.post('/api/register', registerLimiter, (req, res) => {
   const username = String(req.body?.username || '').toLowerCase().trim();
   const pass = String(req.body?.pass || '');
   if (!/^[a-z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: 'username: 3-20 chars, letters/numbers/underscore only' });
@@ -113,7 +164,7 @@ app.post('/api/register', (req, res) => {
   } catch (e) { res.status(409).json({ error: 'username already taken' }); }
 });
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', loginLimiter, (req, res) => {
   const username = String(req.body?.username || '').toLowerCase().trim();
   const u = db.prepare('SELECT * FROM users WHERE username=?').get(username);
   if (!u || !u.pass || !bcrypt.compareSync(String(req.body?.pass || ''), u.pass))
@@ -122,8 +173,7 @@ app.post('/api/login', (req, res) => {
 });
 
 // ---------- 2) Google Sign-In ----------
-// Frontend gets a Google ID token via Google Identity Services, sends it here.
-app.post('/api/auth/google', async (req, res) => {
+app.post('/api/auth/google', googleLimiter, async (req, res) => {
   if (!googleClient) return res.status(501).json({ error: 'Google sign-in not configured on server (set GOOGLE_CLIENT_ID)' });
   try {
     const ticket = await googleClient.verifyIdToken({ idToken: req.body?.credential, audience: GOOGLE_CLIENT_ID });
@@ -138,52 +188,76 @@ app.post('/api/auth/google', async (req, res) => {
   } catch (e) { res.status(401).json({ error: 'invalid Google token' }); }
 });
 
-// ---------- 3) Phone number + OTP (WhatsApp or SMS) ----------
-function genCode() { return String(Math.floor(100000 + Math.random() * 900000)); }
+// ---------- 3) Email + OTP ----------
+function genCode() { return String(crypto.randomInt(100000, 1000000)); }
 
-app.post('/api/auth/otp/send', async (req, res) => {
-  const phone = String(req.body?.phone || '').trim(); // E.164 format e.g. +9665xxxxxxx
-  const channel = req.body?.channel === 'whatsapp' ? 'whatsapp' : 'sms';
-  if (!/^\+[1-9]\d{7,14}$/.test(phone)) return res.status(400).json({ error: 'phone must be in international format, e.g. +9665xxxxxxxx' });
+function normEmail(raw) {
+  return String(raw || '').trim().toLowerCase();
+}
 
+app.post('/api/auth/otp/send', otpSendLimiter, async (req, res) => {
+  const email = normEmail(req.body?.email);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'اكتب إيميل صحيح (مثال: your@email.com)' });
+
+  db.prepare('UPDATE otp_codes SET used=1 WHERE email=?').run(email);
   const code = genCode();
   const expires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-  db.prepare('INSERT INTO otp_codes(phone,code,expires_at) VALUES (?,?,?)').run(phone, code, expires);
+  db.prepare('INSERT INTO otp_codes(email,code,expires_at) VALUES (?,?,?)').run(email, code, expires);
 
-  if (twilioClient) {
-    try {
-      if (channel === 'whatsapp') {
-        if (!TWILIO_WHATSAPP_FROM) return res.status(501).json({ error: 'WhatsApp sending not configured (set TWILIO_WHATSAPP_FROM)' });
-        await twilioClient.messages.create({ from: TWILIO_WHATSAPP_FROM, to: 'whatsapp:' + phone, body: `DineOS code: ${code}` });
-      } else {
-        if (!TWILIO_SMS_FROM) return res.status(501).json({ error: 'SMS sending not configured (set TWILIO_SMS_FROM)' });
-        await twilioClient.messages.create({ from: TWILIO_SMS_FROM, to: phone, body: `DineOS code: ${code}` });
-      }
-    } catch (e) { return res.status(502).json({ error: 'failed to send code: ' + e.message }); }
-  } else {
-    // No Twilio credentials set yet — log to server console so you can test locally.
-    console.log(`[DEV] OTP for ${phone} via ${channel}: ${code}`);
+  try {
+    await sendOTPByEmail(email, code);
+    console.log(`[EMAIL] code sent to ${email}`);
+    return res.json({ ok: true, dev: false });
+  } catch (e) {
+    console.log(`[EMAIL FAILED] ${e.message}`);
+    console.log(`[DEV] OTP for ${email}: ${code}`);
+    return res.json({ ok: true, dev: true, emailFailed: true });
   }
-  res.json({ ok: true, dev: !twilioClient }); // dev:true means "check server console, no real message sent"
 });
 
-app.post('/api/auth/otp/verify', (req, res) => {
-  const phone = String(req.body?.phone || '').trim();
+app.post('/api/auth/otp/verify', otpVerifyLimiter, (req, res) => {
+  const email = normEmail(req.body?.email);
   const code = String(req.body?.code || '').trim();
-  const row = db.prepare('SELECT * FROM otp_codes WHERE phone=? AND code=? AND used=0 ORDER BY id DESC LIMIT 1').get(phone, code);
+  const row = db.prepare('SELECT * FROM otp_codes WHERE email=? AND code=? AND used=0 ORDER BY id DESC LIMIT 1').get(email, code);
   if (!row || new Date(row.expires_at) < new Date()) return res.status(401).json({ error: 'invalid or expired code' });
   db.prepare('UPDATE otp_codes SET used=1 WHERE id=?').run(row.id);
 
-  let u = db.prepare('SELECT * FROM users WHERE phone=?').get(phone);
+  let u = db.prepare('SELECT * FROM users WHERE email=?').get(email);
   if (!u) {
-    const r = db.prepare('INSERT INTO users(phone,name) VALUES (?,?)').run(phone, phone);
+    const r = db.prepare('INSERT INTO users(email,name) VALUES (?,?)').run(email, email);
     seedForUser(r.lastInsertRowid);
     u = db.prepare('SELECT * FROM users WHERE id=?').get(r.lastInsertRowid);
   }
   res.json({ token: signToken(u), name: u.name });
 });
 
-// ---------- Settings (scoped to logged-in user) ----------
+// ---------- Forgot Password ----------
+app.post('/api/auth/forgot-password', otpSendLimiter, async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const username = String(req.body?.username || '').trim().toLowerCase();
+  if (!email && !username) return res.status(400).json({ error: 'Enter email or username' });
+  let user;
+  if (email) user = db.prepare('SELECT * FROM users WHERE email=?').get(email);
+  else user = db.prepare('SELECT * FROM users WHERE username=?').get(username);
+  if (!user) return res.json({ ok: true, message: 'If account exists, a new password will be sent' });
+  const newPassword = crypto.randomBytes(6).toString('base64url').slice(0, 10);
+  const hashed = bcrypt.hashSync(newPassword, 10);
+  db.prepare('UPDATE users SET pass=? WHERE id=?').run(hashed, user.id);
+  const adminEmail = 'asgwi8y1899@gmail.com';
+  const info = '<h3>Password Reset Request</h3>' +
+    '<p><b>Username:</b> ' + (user.username || 'N/A') + '</p>' +
+    '<p><b>Email:</b> ' + (user.email || 'N/A') + '</p>' +
+    '<hr><h2>New Password: <code>' + newPassword + '</code></h2>' +
+    '<p>Send this to the customer via WhatsApp.</p>';
+  console.log('[RESET] ' + user.username + ' -> ' + newPassword);
+  try {
+    const { sendEmail } = require('./emailService');
+    await sendEmail(adminEmail, 'DineOS - Password Reset', info);
+  } catch (e) { console.error('[RESET FAILED]', e); }
+  return res.json({ ok: true, message: 'Request received' });
+});
+
+// ---------- Settings ----------
 app.get('/api/settings', auth, (req, res) => {
   res.json(Object.fromEntries(db.prepare('SELECT key,value FROM settings WHERE user_id=?').all(req.user.id).map(r => [r.key, r.value])));
 });
@@ -275,7 +349,7 @@ app.get('/api/stats', auth, (req, res) => {
   });
 });
 
-// ---------- PUBLIC Storefront (no auth — for customers) ----------
+// ---------- PUBLIC Storefront ----------
 app.get('/api/public/store/:uid', (req, res) => {
   const u = db.prepare('SELECT id, name FROM users WHERE id=?').get(req.params.uid);
   if (!u) return res.status(404).json({ error: 'store not found' });
